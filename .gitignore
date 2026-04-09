@@ -2,4 +2,4 @@
 *.log
 /sessions.json
 __pycache__
-!/prompts/*
+#!/prompts/*
