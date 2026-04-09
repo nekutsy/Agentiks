@@ -1,5 +1,12 @@
 *.txt
 *.log
 /sessions.json
+/tools/*
+!/tools/__init__.py
+!/tools/end_sesssion.py
+!/tools/example_time.py
+!/tools/execute_python.py
+!/tools/reload_tools.py
+is_run
 __pycache__
 #!/prompts/*
