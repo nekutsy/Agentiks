@@ -41,10 +41,9 @@ def build_initial_history(system_prompt: str, user_first: str) -> List[Dict]:
     return history
 
 def get_next_user_message(session_num: int, msg_num: int) -> str:
-    return f"Blank message. (User message #{msg_num})"
+    return f"Automatically generated message number {msg_num}. Go on with your business."
 
 def write_current_input(messages: List[Dict], session_num: int):
-    """Записывает текущие входные сообщения для модели в файл (перезаписывая)."""
     input_text = f"=== Session {session_num} ===\n"
     for msg in messages:
         role = msg.get('role', 'unknown')
@@ -89,7 +88,6 @@ def stream_chat(messages: List[Dict], session_num: int, tools=None):
     log = get_logger()
     text_log = get_logger('text')
     
-    # Записываем входные данные в current_input.txt
     write_current_input(messages, session_num)
     
     full_content = ""
@@ -150,7 +148,6 @@ def get_chat_response(messages: List[Dict], session_num: int, tools=None):
     log = get_logger()
     text_log = get_logger('text')
     
-    # Записываем входные данные в current_input.txt
     write_current_input(messages, session_num)
     
     try:
@@ -296,8 +293,6 @@ def main():
             
             if tool_calls:
                 continue
-            
-            time.sleep(0.1)
 
         if not session_mgr.is_run_exists():
             log.info(f"Session {session_num}: is_run removed, session completed successfully.")
