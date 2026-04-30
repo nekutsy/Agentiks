@@ -1,13 +1,10 @@
 import signal
 import sys
-import time
 import json
 from typing import Optional, List, Dict
-
 import ollama
-
 from config import (MAX_SESSION_NUM, MODEL_NAME, OLLAMA_OPTIONS, STREAM_MESSAGES, LOG_THINKING,
-                    SYSTEM_PROMPT_FILE, USER_FIRST_MESSAGE_FILE, LOG_CURRENT_INPUT)
+                    SYSTEM_PROMPT_FILE, USER_FIRST_MESSAGE_FILE, LOG_CURRENT_INPUT, THINKING_HISTORY_MODE)
 from logger_setup import get_logger
 from session_manager import SessionManager
 import tool_loader
@@ -21,7 +18,8 @@ def signal_handler(sig, frame):
     get_logger().info("Received interrupt signal, shutting down gracefully...")
     running = False
     if current_session_mgr and current_session_mgr.current_session:
-        get_logger().info(f"Session {current_session_mgr.current_session['number']} interrupted, will resume next time.")
+        get_logger().info(f"Session {current_session_mgr.current_session['number']} interrupted, marking as completed.")
+        current_session_mgr.complete_current_session()
     sys.exit(0)
 
 def load_prompt(file_path: str) -> str:
@@ -44,24 +42,30 @@ def get_next_user_message(session_num: int, msg_num: int) -> str:
     return f"Automatically generated message number {msg_num}. Go on with your business."
 
 def write_current_input(messages: List[Dict], session_num: int):
-    input_text = f"=== Session {session_num} ===\n"
-    for msg in messages:
-        role = msg.get('role', 'unknown')
-        content = msg.get('content', '')
-        if role == 'system':
-            input_text += f"[SYSTEM]\n{content}\n"
-        elif role == 'user':
-            input_text += f"[USER]\n{content}\n"
-        elif role == 'assistant':
-            if content:
-                input_text += f"[ASSISTANT]\n{content}\n"
-            if 'tool_calls' in msg:
-                input_text += f"[TOOL_CALLS]\n{json.dumps(msg['tool_calls'], indent=2)}\n"
-        elif role == 'tool':
-            input_text += f"[TOOL_RESULT] {msg.get('tool_call_id')}\n{msg.get('content', '')}\n"
-        else:
-            input_text += f"[{role.upper()}]\n{content}\n"
-    input_text += "=== END INPUT ===\n"
+    try:
+        from transformers import AutoTokenizer
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
+        formatted = tokenizer.apply_chat_template(messages, tokenize=False)
+        input_text = f"=== Session {session_num} ===\n{formatted}\n=== END INPUT ===\n"
+    except Exception:
+        input_text = f"=== Session {session_num} ===\n"
+        for msg in messages:
+            role = msg.get('role', 'unknown')
+            content = msg.get('content', '')
+            if role == 'system':
+                input_text += f"[SYSTEM]\n{content}\n"
+            elif role == 'user':
+                input_text += f"[USER]\n{content}\n"
+            elif role == 'assistant':
+                if content:
+                    input_text += f"[ASSISTANT]\n{content}\n"
+                if 'tool_calls' in msg:
+                    input_text += f"[TOOL_CALLS]\n{json.dumps(msg['tool_calls'], indent=2)}\n"
+            elif role == 'tool':
+                input_text += f"[TOOL_RESULT] {msg.get('tool_call_id')}\n{msg.get('content', '')}\n"
+            else:
+                input_text += f"[{role.upper()}]\n{content}\n"
+        input_text += "=== END INPUT ===\n"
     with open(LOG_CURRENT_INPUT, 'w', encoding='utf-8') as f:
         f.write(input_text)
 
@@ -77,115 +81,155 @@ def log_message(session_num: int, msg_num: int, role: str, content: str = None, 
 def serialize_tool_call(tc):
     if isinstance(tc, dict):
         return tc
-    if hasattr(tc, '__dict__'):
-        d = {k: v for k, v in tc.__dict__.items() if not k.startswith('_')}
-        if 'function' in d and hasattr(d['function'], '__dict__'):
-            d['function'] = {k: v for k, v in d['function'].__dict__.items() if not k.startswith('_')}
-        return d
+    if hasattr(tc, 'model_dump'):
+        return tc.model_dump()
+    if hasattr(tc, 'dict'):
+        return tc.dict()
     return {"raw": str(tc)}
+
+def prepare_history_for_api(history: List[Dict], mode: str) -> List[Dict]:
+    formatted = []
+    for i, msg in enumerate(history):
+        new_msg = {k: v for k, v in msg.items() if k != 'thinking'}
+        if msg.get('role') == 'assistant' and msg.get('thinking'):
+            thinking = msg['thinking']
+            content = msg.get('content', '')
+            if mode == "all":
+                new_msg['content'] = f"<think>{thinking}</think>\n\n{content}" if content else f"<think>{thinking}</think>"
+            elif mode == "last" and i == len(history) - 1:
+                new_msg['content'] = f"<think>{thinking}</think>\n\n{content}" if content else f"<think>{thinking}</think>"
+        formatted.append(new_msg)
+    return formatted
+
+def _finalize_tool_calls(raw_calls: List[Dict]) -> List[Dict]:
+    finalized = []
+    for tc in raw_calls:
+        func = tc.get('function', {})
+        args = func.get('arguments', '')
+        if isinstance(args, str):
+            try:
+                args = json.loads(args) if args.strip() else {}
+            except json.JSONDecodeError:
+                args = {}
+        finalized.append({
+            'id': tc.get('id', f'tc_{len(finalized)}'),
+            'type': 'function',
+            'function': {
+                'name': func.get('name', ''),
+                'arguments': args
+            }
+        })
+    return finalized
 
 def stream_chat(messages: List[Dict], session_num: int, tools=None):
     log = get_logger()
     text_log = get_logger('text')
-    
     write_current_input(messages, session_num)
-    
+
     full_content = ""
     full_thinking = ""
-    tool_calls = []
+    raw_tool_calls = []
+    printed_tool_names = set()
     token_count = 0
 
     try:
-        stream = ollama.chat(
-            model=MODEL_NAME,
-            messages=messages,
-            options=OLLAMA_OPTIONS,
-            stream=True,
-            tools=tools
-        )
+        stream = ollama.chat(model=MODEL_NAME, messages=messages, options=OLLAMA_OPTIONS, stream=True, tools=tools)
         print(f"\n--- Session {session_num}, generating response ---")
-        
+
         for chunk in stream:
             if 'message' in chunk:
                 msg = chunk['message']
                 if 'content' in msg and msg['content']:
-                    content = msg['content']
-                    print(content, end='', flush=True)
-                    full_content += content
-                
+                    print(msg['content'], end='', flush=True)
+                    full_content += msg['content']
+
                 if LOG_THINKING:
-                    thinking_parts = []
-                    if 'thinking' in msg and msg['thinking']:
-                        thinking_parts.append(msg['thinking'])
-                    if 'reasoning' in msg and msg['reasoning']:
-                        thinking_parts.append(msg['reasoning'])
-                    if 'reasoning_content' in msg and msg['reasoning_content']:
-                        thinking_parts.append(msg['reasoning_content'])
-                    for part in thinking_parts:
-                        if part:
-                            print(f"\033[94m{part}\033[0m", end='', flush=True)
-                            full_thinking += part
-                
+                    for key in ['thinking', 'reasoning', 'reasoning_content']:
+                        if key in msg and msg[key]:
+                            val = msg[key]
+                            print(f"\033[94m{val}\033[0m", end='', flush=True)
+                            full_thinking += str(val)
+
                 if 'tool_calls' in msg and msg['tool_calls']:
-                    for tc in msg['tool_calls']:
-                        tool_calls.append(serialize_tool_call(tc))
-            
+                    for i, tc_chunk in enumerate(msg['tool_calls']):
+                        if i >= len(raw_tool_calls):
+                            raw_tool_calls.append({'function': {'name': '', 'arguments': ''}})
+                        
+                        func_data = tc_chunk.get('function', {})
+                        if func_data.get('name'):
+                            name = func_data['name']
+                            raw_tool_calls[i]['function']['name'] = name
+                            if name not in printed_tool_names:
+                                print(f"\n\033[33m[TOOL {i}] {name}:\033[0m ", end='', flush=True)
+                                printed_tool_names.add(name)
+                        if 'arguments' in func_data and func_data['arguments']:
+                            args_val = func_data['arguments']
+                            args_str = args_val if isinstance(args_val, str) else json.dumps(args_val)
+                            raw_tool_calls[i]['function']['arguments'] += args_str
+                            print(f"\033[33m{args_val}\033[0m", end='', flush=True)
+
             if 'eval_count' in chunk:
                 token_count = chunk['eval_count']
-        
+
         print("\n--- End of response ---\n")
-        
         if full_thinking:
             text_log.info(f"Session {session_num} (thinking):\n{full_thinking}")
-        
-        return full_content, tool_calls, token_count
-    
+
+        tool_calls = []
+        for tc in raw_tool_calls:
+            func = tc.get('function', {})
+            args = func.get('arguments', '')
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args) if args.strip() else {}
+                except json.JSONDecodeError:
+                    args = {}
+            tool_calls.append({
+                'id': tc.get('id', f'tc_{len(tool_calls)}'),
+                'type': 'function',
+                'function': {
+                    'name': func.get('name', ''),
+                    'arguments': args
+                }
+            })
+
+        return full_content, full_thinking, tool_calls, token_count
     except Exception as e:
         log.error(f"Streaming error: {e}")
-        return None, [], 0
+        return None, None, [], 0
 
 def get_chat_response(messages: List[Dict], session_num: int, tools=None):
     log = get_logger()
     text_log = get_logger('text')
-    
     write_current_input(messages, session_num)
-    
+
     try:
-        response = ollama.chat(
-            model=MODEL_NAME,
-            messages=messages,
-            options=OLLAMA_OPTIONS,
-            stream=False,
-            tools=tools
-        )
-        content = response['message']['content']
+        response = ollama.chat(model=MODEL_NAME, messages=messages, options=OLLAMA_OPTIONS, stream=False, tools=tools)
+        content = response['message'].get('content', '')
         tool_calls = [serialize_tool_call(tc) for tc in response['message'].get('tool_calls', [])]
         eval_count = response.get('eval_count', 0)
-        
+
+        thinking = None
         if LOG_THINKING and 'message' in response:
             msg = response['message']
-            thinking = None
-            if 'thinking' in msg and msg['thinking']:
-                thinking = msg['thinking']
-            elif 'reasoning' in msg and msg['reasoning']:
-                thinking = msg['reasoning']
-            elif 'reasoning_content' in msg and msg['reasoning_content']:
-                thinking = msg['reasoning_content']
+            for key in ['thinking', 'reasoning', 'reasoning_content']:
+                if key in msg and msg[key]:
+                    thinking = msg[key]
+                    break
             if thinking:
                 print(f"\n--- Thinking (session {session_num}) ---")
                 print(f"\033[90m{thinking}\033[0m")
                 print("--- End thinking ---\n")
                 text_log.info(f"Session {session_num} (thinking):\n{thinking}")
-        
-        return content, tool_calls, eval_count
+
+        return content, thinking, tool_calls, eval_count
     except Exception as e:
         log.error(f"Ollama error: {e}")
-        return None, [], 0
+        return None, None, [], 0
 
 def process_tool_calls(tool_calls: List[Dict], session_num: int, current_msg_num: int, history: List[Dict]) -> bool:
     tools_log = get_logger('tools')
     current_tool_log = get_logger('current_tool')
-    
     for tc in tool_calls:
         if 'function' in tc:
             func = tc['function']
@@ -196,22 +240,18 @@ def process_tool_calls(tool_calls: List[Dict], session_num: int, current_msg_num
                     arguments = json.loads(arguments)
                 except:
                     arguments = {}
-            
+
             tools_log.info(f"Session {session_num}, msg {current_msg_num}: calling tool '{tool_name}' with args {arguments}")
             current_tool_log.info(f"Session {session_num}, msg {current_msg_num}: executing tool '{tool_name}'")
-            
+
             result = execute_tool(tool_name, arguments)
             tools_log.info(f"Session {session_num}, msg {current_msg_num}: tool '{tool_name}' returned: {result[:200]}")
-            
-            tool_msg = {
-                'role': 'tool',
-                'tool_call_id': tc.get('id', 'unknown'),
-                'content': result
-            }
+
+            tool_msg = {'role': 'tool', 'tool_call_id': tc.get('id', 'unknown'), 'content': result}
             history.append(tool_msg)
             msg_num = len(history)
             log_message(session_num, msg_num, 'tool', result)
-            
+
             if tool_name == 'end_session' and result == '__END_SESSION__':
                 return True
     return False
@@ -219,7 +259,6 @@ def process_tool_calls(tool_calls: List[Dict], session_num: int, current_msg_num
 def main():
     global current_session_mgr
     signal.signal(signal.SIGINT, signal_handler)
-
     log = get_logger()
     log.info("Starting LLM environment with Ollama")
 
@@ -252,17 +291,16 @@ def main():
             if history and history[-1]['role'] == 'assistant':
                 next_msg_num = len(history) + 1
                 user_msg_content = get_next_user_message(session_num, next_msg_num)
-                user_msg = {'role': 'user', 'content': user_msg_content}
-                history.append(user_msg)
                 session_mgr.update_current_session(history=history)
                 log_message(session_num, len(history), 'user', user_msg_content)
 
             current_tools = get_tools_for_ollama()
-            
+            api_history = prepare_history_for_api(history, THINKING_HISTORY_MODE)
+
             if STREAM_MESSAGES:
-                assistant_msg, tool_calls, eval_count = stream_chat(history, session_num, current_tools)
+                assistant_msg, thinking, tool_calls, eval_count = stream_chat(api_history, session_num, current_tools)
             else:
-                assistant_msg, tool_calls, eval_count = get_chat_response(history, session_num, current_tools)
+                assistant_msg, thinking, tool_calls, eval_count = get_chat_response(api_history, session_num, current_tools)
 
             if assistant_msg is None and not tool_calls:
                 log.error(f"Failed to get response for session {session_num}. Completing session.")
@@ -273,24 +311,26 @@ def main():
                 assistant_entry = {'role': 'assistant'}
                 if assistant_msg:
                     assistant_entry['content'] = assistant_msg
+                if thinking:
+                    assistant_entry['thinking'] = thinking
                 if tool_calls:
                     assistant_entry['tool_calls'] = tool_calls
                 history.append(assistant_entry)
                 msg_num = len(history)
                 log_message(session_num, msg_num, 'assistant', assistant_msg)
                 session_mgr.update_current_session(history=history)
-            
+
             end_session = False
             if tool_calls:
                 current_msg_num = len(history)
                 end_session = process_tool_calls(tool_calls, session_num, current_msg_num, history)
                 session_mgr.update_current_session(history=history)
-            
+
             if end_session:
                 log.info(f"Session {session_num}: end_session tool called, completing session.")
                 session_mgr.complete_current_session()
                 break
-            
+
             if tool_calls:
                 continue
 

@@ -2,6 +2,7 @@ import subprocess
 import tempfile
 import os
 import sys
+from config import EXEC_TEMP_DIR
 
 TOOL_DEFINITION = {
     "type": "function",
@@ -27,7 +28,8 @@ TOOL_DEFINITION = {
 }
 
 def execute(code: str, timeout: int = 5) -> str:
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8') as f:
+    os.makedirs(EXEC_TEMP_DIR, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8', dir=EXEC_TEMP_DIR) as f:
         f.write(code)
         temp_path = f.name
 
@@ -37,7 +39,7 @@ def execute(code: str, timeout: int = 5) -> str:
             capture_output=True,
             text=True,
             timeout=timeout,
-            cwd=os.path.dirname(temp_path)
+            cwd=EXEC_TEMP_DIR
         )
 
         output_parts = []

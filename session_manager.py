@@ -52,7 +52,6 @@ class SessionManager:
     def load_or_create_session(self, initial_history: List[Dict] = None) -> Dict:
         last = self.get_last_session()
         if last and not self.is_session_completed(last):
-            # Убедимся, что в загруженной сессии есть поле history
             if 'history' not in last:
                 last['history'] = []
             self.current_session = last

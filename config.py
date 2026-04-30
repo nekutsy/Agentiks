@@ -8,6 +8,10 @@ LOG_GENERATED_TOOLS = os.path.join(BASE_DIR, "generated_tools.log")
 LOG_CURRENT_TOOL = os.path.join(BASE_DIR, "current_tool_execution.txt")
 LOG_CURRENT_INPUT = os.path.join(BASE_DIR, "current_input.txt")
 
+EXEC_TEMP_DIR = os.path.join(BASE_DIR, "current.py")
+
+TEMP_PYTHON_DIR = os.path.join(BASE_DIR, "temp_python")
+
 MODEL_NAME = "gemma4:e2b"
 
 OLLAMA_OPTIONS = {
@@ -15,6 +19,7 @@ OLLAMA_OPTIONS = {
 }
 STREAM_MESSAGES = True
 LOG_THINKING = True
+THINKING_HISTORY_MODE = "all"  # "none", "all", "last"
 
 PROMPTS_DIR = os.path.join(BASE_DIR, "prompts")
 SYSTEM_PROMPT_FILE = os.path.join(PROMPTS_DIR, "system_prompt.txt")
