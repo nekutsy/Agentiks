@@ -78,7 +78,7 @@ def log_message(session_num: int, msg_num: int, role: str, content: str = None, 
     elif role == 'tool' and content:
         text_log.info(f"Session {session_num}, msg {msg_num} (tool result):\n{content[:200]}")
 
-def serialize_tool_call(tc):
+def normalize_tool_call(tc):
     if isinstance(tc, dict):
         return tc
     if hasattr(tc, 'model_dump'):
@@ -87,23 +87,15 @@ def serialize_tool_call(tc):
         return tc.dict()
     return {"raw": str(tc)}
 
-def prepare_history_for_api(history: List[Dict], mode: str) -> List[Dict]:
-    formatted = []
-    for i, msg in enumerate(history):
-        new_msg = {k: v for k, v in msg.items() if k != 'thinking'}
-        if msg.get('role') == 'assistant' and msg.get('thinking'):
-            thinking = msg['thinking']
-            content = msg.get('content', '')
-            if mode == "all":
-                new_msg['content'] = f"<think>{thinking}</think>\n\n{content}" if content else f"<think>{thinking}</think>"
-            elif mode == "last" and i == len(history) - 1:
-                new_msg['content'] = f"<think>{thinking}</think>\n\n{content}" if content else f"<think>{thinking}</think>"
-        formatted.append(new_msg)
-    return formatted
+def extract_thinking(msg: Dict) -> Optional[str]:
+    for key in ['thinking', 'reasoning', 'reasoning_content']:
+        if key in msg and msg[key]:
+            return msg[key]
+    return None
 
-def _finalize_tool_calls(raw_calls: List[Dict]) -> List[Dict]:
+def finalize_tool_calls(raw_tool_calls: List[Dict]) -> List[Dict]:
     finalized = []
-    for tc in raw_calls:
+    for i, tc in enumerate(raw_tool_calls):
         func = tc.get('function', {})
         args = func.get('arguments', '')
         if isinstance(args, str):
@@ -112,7 +104,7 @@ def _finalize_tool_calls(raw_calls: List[Dict]) -> List[Dict]:
             except json.JSONDecodeError:
                 args = {}
         finalized.append({
-            'id': tc.get('id', f'tc_{len(finalized)}'),
+            'id': tc.get('id', f'tc_{i}'),
             'type': 'function',
             'function': {
                 'name': func.get('name', ''),
@@ -120,6 +112,18 @@ def _finalize_tool_calls(raw_calls: List[Dict]) -> List[Dict]:
             }
         })
     return finalized
+
+def prepare_history_for_api(history: List[Dict], mode: str) -> List[Dict]:
+    formatted = []
+    for i, msg in enumerate(history):
+        new_msg = {k: v for k, v in msg.items() if k != 'thinking'}
+        if msg.get('role') == 'assistant' and msg.get('thinking'):
+            thinking = msg['thinking']
+            content = msg.get('content', '')
+            if mode == "all" or (mode == "last" and i == len(history) - 1):
+                new_msg['content'] = f"<think>{thinking}</think>\n\n{content}" if content else f"<think>{thinking}</think>"
+        formatted.append(new_msg)
+    return formatted
 
 def stream_chat(messages: List[Dict], session_num: int, tools=None):
     log = get_logger()
@@ -144,17 +148,15 @@ def stream_chat(messages: List[Dict], session_num: int, tools=None):
                     full_content += msg['content']
 
                 if LOG_THINKING:
-                    for key in ['thinking', 'reasoning', 'reasoning_content']:
-                        if key in msg and msg[key]:
-                            val = msg[key]
-                            print(f"\033[94m{val}\033[0m", end='', flush=True)
-                            full_thinking += str(val)
+                    thinking_chunk = extract_thinking(msg)
+                    if thinking_chunk:
+                        print(f"\033[94m{thinking_chunk}\033[0m", end='', flush=True)
+                        full_thinking += str(thinking_chunk)
 
                 if 'tool_calls' in msg and msg['tool_calls']:
                     for i, tc_chunk in enumerate(msg['tool_calls']):
-                        if i >= len(raw_tool_calls):
+                        while len(raw_tool_calls) <= i:
                             raw_tool_calls.append({'function': {'name': '', 'arguments': ''}})
-                        
                         func_data = tc_chunk.get('function', {})
                         if func_data.get('name'):
                             name = func_data['name']
@@ -175,24 +177,7 @@ def stream_chat(messages: List[Dict], session_num: int, tools=None):
         if full_thinking:
             text_log.info(f"Session {session_num} (thinking):\n{full_thinking}")
 
-        tool_calls = []
-        for tc in raw_tool_calls:
-            func = tc.get('function', {})
-            args = func.get('arguments', '')
-            if isinstance(args, str):
-                try:
-                    args = json.loads(args) if args.strip() else {}
-                except json.JSONDecodeError:
-                    args = {}
-            tool_calls.append({
-                'id': tc.get('id', f'tc_{len(tool_calls)}'),
-                'type': 'function',
-                'function': {
-                    'name': func.get('name', ''),
-                    'arguments': args
-                }
-            })
-
+        tool_calls = finalize_tool_calls(raw_tool_calls)
         return full_content, full_thinking, tool_calls, token_count
     except Exception as e:
         log.error(f"Streaming error: {e}")
@@ -206,16 +191,13 @@ def get_chat_response(messages: List[Dict], session_num: int, tools=None):
     try:
         response = ollama.chat(model=MODEL_NAME, messages=messages, options=OLLAMA_OPTIONS, stream=False, tools=tools)
         content = response['message'].get('content', '')
-        tool_calls = [serialize_tool_call(tc) for tc in response['message'].get('tool_calls', [])]
+        raw_tool_calls = response['message'].get('tool_calls', [])
+        tool_calls = [normalize_tool_call(tc) for tc in raw_tool_calls]
         eval_count = response.get('eval_count', 0)
 
         thinking = None
-        if LOG_THINKING and 'message' in response:
-            msg = response['message']
-            for key in ['thinking', 'reasoning', 'reasoning_content']:
-                if key in msg and msg[key]:
-                    thinking = msg[key]
-                    break
+        if LOG_THINKING:
+            thinking = extract_thinking(response['message'])
             if thinking:
                 print(f"\n--- Thinking (session {session_num}) ---")
                 print(f"\033[90m{thinking}\033[0m")
@@ -231,29 +213,28 @@ def process_tool_calls(tool_calls: List[Dict], session_num: int, current_msg_num
     tools_log = get_logger('tools')
     current_tool_log = get_logger('current_tool')
     for tc in tool_calls:
-        if 'function' in tc:
-            func = tc['function']
-            tool_name = func.get('name')
-            arguments = func.get('arguments', {})
-            if isinstance(arguments, str):
-                try:
-                    arguments = json.loads(arguments)
-                except:
-                    arguments = {}
+        func = tc.get('function', {})
+        tool_name = func.get('name')
+        arguments = func.get('arguments', {})
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except:
+                arguments = {}
 
-            tools_log.info(f"Session {session_num}, msg {current_msg_num}: calling tool '{tool_name}' with args {arguments}")
-            current_tool_log.info(f"Session {session_num}, msg {current_msg_num}: executing tool '{tool_name}'")
+        tools_log.info(f"Session {session_num}, msg {current_msg_num}: calling tool '{tool_name}' with args {arguments}")
+        current_tool_log.info(f"Session {session_num}, msg {current_msg_num}: executing tool '{tool_name}'")
 
-            result = execute_tool(tool_name, arguments)
-            tools_log.info(f"Session {session_num}, msg {current_msg_num}: tool '{tool_name}' returned: {result[:200]}")
+        result = execute_tool(tool_name, arguments)
+        tools_log.info(f"Session {session_num}, msg {current_msg_num}: tool '{tool_name}' returned: {result[:200]}")
 
-            tool_msg = {'role': 'tool', 'tool_call_id': tc.get('id', 'unknown'), 'content': result}
-            history.append(tool_msg)
-            msg_num = len(history)
-            log_message(session_num, msg_num, 'tool', result)
+        tool_msg = {'role': 'tool', 'tool_call_id': tc.get('id', 'unknown'), 'content': result}
+        history.append(tool_msg)
+        msg_num = len(history)
+        log_message(session_num, msg_num, 'tool', result)
 
-            if tool_name == 'end_session' and result == '__END_SESSION__':
-                return True
+        if tool_name == 'end_session' and result == '__END_SESSION__':
+            return True
     return False
 
 def main():
@@ -268,9 +249,6 @@ def main():
     system_prompt = load_prompt(SYSTEM_PROMPT_FILE)
     user_first = load_prompt(USER_FIRST_MESSAGE_FILE)
     initial_history = build_initial_history(system_prompt, user_first)
-
-    log.info(f"System prompt loaded: {len(system_prompt)} chars")
-    log.info(f"User first message loaded: {len(user_first)} chars")
 
     session_mgr = SessionManager()
     current_session_mgr = session_mgr
@@ -291,6 +269,7 @@ def main():
             if history and history[-1]['role'] == 'assistant':
                 next_msg_num = len(history) + 1
                 user_msg_content = get_next_user_message(session_num, next_msg_num)
+                history.append({'role': 'user', 'content': user_msg_content})
                 session_mgr.update_current_session(history=history)
                 log_message(session_num, len(history), 'user', user_msg_content)
 

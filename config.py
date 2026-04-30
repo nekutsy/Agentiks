@@ -12,7 +12,7 @@ EXEC_TEMP_DIR = os.path.join(BASE_DIR, "current.py")
 
 TEMP_PYTHON_DIR = os.path.join(BASE_DIR, "temp_python")
 
-MODEL_NAME = "gemma4:e2b"
+MODEL_NAME = "gemma4:e4b"
 
 OLLAMA_OPTIONS = {
     "num_predict": 1024*32,

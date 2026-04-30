@@ -13,33 +13,23 @@ def setup_loggers():
     console.setFormatter(formatter)
     root_logger.addHandler(console)
 
-    text_handler = logging.FileHandler(LOG_GENERATED_TEXT, encoding='utf-8')
-    text_handler.setFormatter(formatter)
-    text_logger = logging.getLogger('text')
-    text_logger.setLevel(logging.INFO)
-    text_logger.addHandler(text_handler)
-    text_logger.propagate = False
-
-    tools_handler = logging.FileHandler(LOG_GENERATED_TOOLS, encoding='utf-8')
-    tools_handler.setFormatter(formatter)
-    tools_logger = logging.getLogger('tools')
-    tools_logger.setLevel(logging.INFO)
-    tools_logger.addHandler(tools_handler)
-    tools_logger.propagate = False
-
-    current_tool_handler = logging.FileHandler(LOG_CURRENT_TOOL, mode='w', encoding='utf-8')
-    current_tool_handler.setFormatter(formatter)
-    current_tool_logger = logging.getLogger('current_tool')
-    current_tool_logger.setLevel(logging.INFO)
-    current_tool_logger.addHandler(current_tool_handler)
-    current_tool_logger.propagate = False
-
-    return {
-        'root': root_logger,
-        'text': text_logger,
-        'tools': tools_logger,
-        'current_tool': current_tool_logger
+    log_config = {
+        'text': (LOG_GENERATED_TEXT, 'a'),
+        'tools': (LOG_GENERATED_TOOLS, 'a'),
+        'current_tool': (LOG_CURRENT_TOOL, 'w')
     }
+
+    loggers = {'root': root_logger}
+    for name, (filename, mode) in log_config.items():
+        handler = logging.FileHandler(filename, mode, encoding='utf-8')
+        handler.setFormatter(formatter)
+        logger = logging.getLogger(name)
+        logger.setLevel(logging.INFO)
+        logger.addHandler(handler)
+        logger.propagate = False
+        loggers[name] = logger
+
+    return loggers
 
 loggers = None
 
