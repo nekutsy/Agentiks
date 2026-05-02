@@ -348,3 +348,6 @@ def main():
             break
 
     log.info("All sessions processed or interrupted. Exiting.")
+
+if __name__ == "__main__":
+    main()
