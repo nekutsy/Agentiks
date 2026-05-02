@@ -3,12 +3,9 @@ import os
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 LOG_SESSIONS = os.path.join(BASE_DIR, "sessions.json")
-LOG_GENERATED_TEXT = os.path.join(BASE_DIR, "generated_text.log")
-LOG_GENERATED_TOOLS = os.path.join(BASE_DIR, "generated_tools.log")
-LOG_CURRENT_TOOL = os.path.join(BASE_DIR, "current_tool_execution.txt")
 LOG_CURRENT_INPUT = os.path.join(BASE_DIR, "current_input.txt")
 
-EXEC_TEMP_DIR = os.path.join(BASE_DIR, "current.py")
+EXEC_TEMP_DIR = BASE_DIR
 
 TEMP_PYTHON_DIR = os.path.join(BASE_DIR, "temp_python")
 
