@@ -1,6 +1,5 @@
 import logging
 import sys
-from config import LOG_GENERATED_TEXT, LOG_GENERATED_TOOLS, LOG_CURRENT_TOOL
 
 def setup_loggers():
     root_logger = logging.getLogger()

@@ -324,7 +324,6 @@ def main():
                 log_message(session_num, msg_num, 'assistant', assistant_msg)
                 session_mgr.update_current_session(history=history)
 
-            # Обновляем streak после обработки ответа
             no_tool_streak = msg_generator.update_streak(tool_calls, no_tool_streak)
 
             end_session = False
