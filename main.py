@@ -9,6 +9,7 @@ from logger_setup import get_logger
 from session_manager import SessionManager
 import tool_loader
 from tool_loader import get_tools_for_ollama, execute_tool
+from message_generator import UserMessageGenerator
 
 running = True
 current_session_mgr: Optional[SessionManager] = None
@@ -273,6 +274,7 @@ def main():
 
     session_mgr = SessionManager()
     current_session_mgr = session_mgr
+    msg_generator = UserMessageGenerator(inactivity_threshold=3)
 
     for session_index in range(MAX_SESSION_NUM):
         if not running:
@@ -283,13 +285,15 @@ def main():
         session_num = session['number']
         log.info(f"Using session #{session_num}, status: {session['status']}, history length: {len(history)}")
 
+        no_tool_streak = 0
+
         while running and session_mgr.is_run_exists():
             session = session_mgr.current_session
             history = session.get('history', [])
 
             if history and history[-1]['role'] == 'assistant':
                 next_msg_num = len(history) + 1
-                user_msg_content = get_next_user_message(session_num, next_msg_num)
+                user_msg_content = msg_generator.generate(session_num, next_msg_num, no_tool_streak)
                 history.append({'role': 'user', 'content': user_msg_content})
                 session_mgr.update_current_session(history=history)
                 log_message(session_num, len(history), 'user', user_msg_content)
@@ -320,6 +324,9 @@ def main():
                 log_message(session_num, msg_num, 'assistant', assistant_msg)
                 session_mgr.update_current_session(history=history)
 
+            # Обновляем streak после обработки ответа
+            no_tool_streak = msg_generator.update_streak(tool_calls, no_tool_streak)
+
             end_session = False
             if tool_calls:
                 current_msg_num = len(history)
@@ -342,6 +349,3 @@ def main():
             break
 
     log.info("All sessions processed or interrupted. Exiting.")
-
-if __name__ == "__main__":
-    main()
