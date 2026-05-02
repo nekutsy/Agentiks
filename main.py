@@ -1,7 +1,8 @@
 import signal
 import sys
 import json
-from typing import Optional, List, Dict
+import textwrap
+from typing import Optional, List, Dict, Any
 import ollama
 from config import (MAX_SESSION_NUM, MODEL_NAME, OLLAMA_OPTIONS, STREAM_MESSAGES, LOG_THINKING,
                     SYSTEM_PROMPT_FILE, USER_FIRST_MESSAGE_FILE, LOG_CURRENT_INPUT, THINKING_HISTORY_MODE)
@@ -39,9 +40,6 @@ def build_initial_history(system_prompt: str, user_first: str) -> List[Dict]:
         history.append({'role': 'user', 'content': user_first})
     return history
 
-def get_next_user_message(session_num: int, msg_num: int) -> str:
-    return f"Automatically generated message number {msg_num}. Go on with your business."
-
 def write_current_input(messages: List[Dict], session_num: int):
     try:
         from transformers import AutoTokenizer
@@ -77,7 +75,7 @@ def log_message(session_num: int, msg_num: int, role: str, content: str = None, 
     if role == 'assistant' and content:
         text_log.info(f"Session {session_num}, msg {msg_num} (response):\n{content}")
     elif role == 'tool' and content:
-        text_log.info(f"Session {session_num}, msg {msg_num} (tool result):\n{content[:200]}")
+        pass
 
 def normalize_tool_call(tc):
     if isinstance(tc, dict):
@@ -125,6 +123,71 @@ def prepare_history_for_api(history: List[Dict], mode: str) -> List[Dict]:
                 new_msg['content'] = f"<think>{thinking}</think>\n\n{content}" if content else f"<think>{thinking}</think>"
         formatted.append(new_msg)
     return formatted
+
+def format_argument_value(value: Any, indent: int = 2) -> str:
+    if isinstance(value, str) and '\n' in value:
+        lines = value.splitlines()
+        return '\n'.join(' ' * indent + line for line in lines)
+    if isinstance(value, dict):
+        return json.dumps(value, indent=indent, ensure_ascii=False)
+    if isinstance(value, list):
+        return json.dumps(value, indent=indent, ensure_ascii=False)
+    return str(value)
+
+def print_colorized_text(text: str, color_code: str = '\033[38;5;208m'):
+    if not text:
+        return
+    lines = text.splitlines()
+    if len(lines) <= 1:
+        print(f"{color_code}{text}\033[0m")
+    else:
+        indented = textwrap.indent(text, '  ')
+        print(f"{color_code}{indented}\033[0m")
+
+def print_tool_call(tool_name: str, arguments: dict):
+    print(f"Calling tool: \033[96m{tool_name}\033[0m")
+    if arguments:
+        args_output = []
+        for key, value in arguments.items():
+            formatted_value = format_argument_value(value, indent=4)
+            args_output.append(f"  {key}: {formatted_value}")
+        final = '\n'.join(args_output)
+        print_colorized_text(final, '\033[38;5;208m')
+    else:
+        print_colorized_text("{}", '\033[38;5;208m')
+    print()
+
+def print_tool_calls(tool_calls: List[Dict]):
+    if not tool_calls:
+        return
+    print("\033[96m=== Tool Calls ===\033[0m")
+    for i, tc in enumerate(tool_calls, 1):
+        func = tc.get('function', {})
+        name = func.get('name', 'unknown')
+        args = func.get('arguments', {})
+        print(f"\033[96mTool {i}: {name}\033[0m")
+        if args:
+            args_output = []
+            for key, value in args.items():
+                formatted_value = format_argument_value(value, indent=4)
+                args_output.append(f"  {key}: {formatted_value}")
+            final = '\n'.join(args_output)
+            print_colorized_text(final, '\033[38;5;208m')
+        else:
+            print_colorized_text("{}", '\033[38;5;208m')
+        if i < len(tool_calls):
+            print()
+    print("\033[96m=================\033[0m\n")
+
+def print_tool_result(tool_name: str, result: str):
+    print(f"\033[92mTool result ({tool_name}):\033[0m")
+    result_str = str(result)
+    if '\n' in result_str:
+        indented = textwrap.indent(result_str, '  ')
+        print(f"\033[92m{indented}\033[0m")
+    else:
+        print(f"\033[92m{result_str}\033[0m")
+    print()
 
 def stream_chat(messages: List[Dict], session_num: int, tools=None):
     log = get_logger()
@@ -175,14 +238,7 @@ def stream_chat(messages: List[Dict], session_num: int, tools=None):
         tool_calls = finalize_tool_calls(raw_tool_calls)
         
         if tool_calls:
-            print("\033[33m=== Tool Calls ===\033[0m")
-            for tc in tool_calls:
-                func = tc.get('function', {})
-                name = func.get('name', 'unknown')
-                args = func.get('arguments', {})
-                print(f"\033[33mTool: {name}\033[0m")
-                print(json.dumps(args, indent=2, ensure_ascii=False))
-            print("\033[33m=================\033[0m\n")
+            print_tool_calls(tool_calls)
         
         return full_content, full_thinking, tool_calls, token_count
     except Exception as e:
@@ -211,14 +267,7 @@ def get_chat_response(messages: List[Dict], session_num: int, tools=None):
                 text_log.info(f"Session {session_num} (thinking):\n{thinking}")
 
         if tool_calls:
-            print("\033[33m=== Tool Calls ===\033[0m")
-            for tc in tool_calls:
-                func = tc.get('function', {})
-                name = func.get('name', 'unknown')
-                args = func.get('arguments', {})
-                print(f"\033[33mTool: {name}\033[0m")
-                print(json.dumps(args, indent=2, ensure_ascii=False))
-            print("\033[33m=================\033[0m\n")
+            print_tool_calls(tool_calls)
 
         return content, thinking, tool_calls, eval_count
     except Exception as e:
@@ -238,11 +287,15 @@ def process_tool_calls(tool_calls: List[Dict], session_num: int, current_msg_num
             except:
                 arguments = {}
 
-        tools_log.info(f"Session {session_num}, msg {current_msg_num}: calling tool '{tool_name}' with args {arguments}")
+        tools_log.info(f"Session {session_num}, msg {current_msg_num}: calling tool '{tool_name}'")
         current_tool_log.info(f"Session {session_num}, msg {current_msg_num}: executing tool '{tool_name}'")
 
+        print_tool_call(tool_name, arguments)
+
         result = execute_tool(tool_name, arguments)
-        tools_log.info(f"Session {session_num}, msg {current_msg_num}: tool '{tool_name}' returned: {result[:200]}")
+        tools_log.info(f"Session {session_num}, msg {current_msg_num}: tool '{tool_name}' returned length {len(str(result))}")
+
+        print_tool_result(tool_name, result)
 
         tool_msg = {'role': 'tool', 'tool_call_id': tc.get('id', 'unknown'), 'content': result}
         history.append(tool_msg)
