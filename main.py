@@ -135,7 +135,6 @@ def stream_chat(messages: List[Dict], session_num: int, tools=None):
     full_thinking = ""
     raw_tool_calls = []
     token_count = 0
-    tool_args_chunks = []
 
     try:
         stream = ollama.chat(model=MODEL_NAME, messages=messages, options=OLLAMA_OPTIONS, stream=True, tools=tools)
@@ -158,17 +157,12 @@ def stream_chat(messages: List[Dict], session_num: int, tools=None):
                     for i, tc_chunk in enumerate(msg['tool_calls']):
                         while len(raw_tool_calls) <= i:
                             raw_tool_calls.append({'function': {'name': '', 'arguments': ''}})
-                            tool_args_chunks.append([])
                         func_data = tc_chunk.get('function', {})
                         if func_data.get('name'):
-                            name = func_data['name']
-                            raw_tool_calls[i]['function']['name'] = name
-                            if name not in [tc.get('function', {}).get('name') for tc in raw_tool_calls[:i]]:
-                                print(f"\n\033[33m[TOOL] {name}:\033[0m")
+                            raw_tool_calls[i]['function']['name'] = func_data['name']
                         if 'arguments' in func_data and func_data['arguments']:
                             args_val = func_data['arguments']
                             args_str = args_val if isinstance(args_val, str) else json.dumps(args_val)
-                            tool_args_chunks[i].append(args_str)
                             raw_tool_calls[i]['function']['arguments'] += args_str
 
             if 'eval_count' in chunk:
@@ -181,7 +175,7 @@ def stream_chat(messages: List[Dict], session_num: int, tools=None):
         tool_calls = finalize_tool_calls(raw_tool_calls)
         
         if tool_calls:
-            print("\n\033[33m=== Tool Calls ===\033[0m")
+            print("\033[33m=== Tool Calls ===\033[0m")
             for tc in tool_calls:
                 func = tc.get('function', {})
                 name = func.get('name', 'unknown')
@@ -217,7 +211,7 @@ def get_chat_response(messages: List[Dict], session_num: int, tools=None):
                 text_log.info(f"Session {session_num} (thinking):\n{thinking}")
 
         if tool_calls:
-            print("\n\033[33m=== Tool Calls ===\033[0m")
+            print("\033[33m=== Tool Calls ===\033[0m")
             for tc in tool_calls:
                 func = tc.get('function', {})
                 name = func.get('name', 'unknown')
