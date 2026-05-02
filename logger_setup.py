@@ -13,22 +13,7 @@ def setup_loggers():
     console.setFormatter(formatter)
     root_logger.addHandler(console)
 
-    log_config = {
-        'text': (LOG_GENERATED_TEXT, 'a'),
-        'tools': (LOG_GENERATED_TOOLS, 'a'),
-        'current_tool': (LOG_CURRENT_TOOL, 'w')
-    }
-
     loggers = {'root': root_logger}
-    for name, (filename, mode) in log_config.items():
-        handler = logging.FileHandler(filename, mode, encoding='utf-8')
-        handler.setFormatter(formatter)
-        logger = logging.getLogger(name)
-        logger.setLevel(logging.INFO)
-        logger.addHandler(handler)
-        logger.propagate = False
-        loggers[name] = logger
-
     return loggers
 
 loggers = None
