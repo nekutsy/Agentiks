@@ -2,9 +2,7 @@
 Background I/O manager. Offloads blocking disk operations from the main agent loop:
   - Session JSON saves
   - Prompt dumps (write_current_input)
-  - Heavy log writes
-
-Uses a single daemon worker thread with a bounded queue.
+  - Heavy log writes (removed)
 """
 import json
 import os
@@ -19,7 +17,7 @@ from logger_setup import get_logger
 
 @dataclass
 class _IOTask:
-    kind: str           # 'save_session' | 'write_file' | 'log' | 'shutdown'
+    kind: str           # 'save_session' | 'write_file' | 'shutdown'
     payload: Any
     callback: Optional[Callable] = None
 
@@ -41,10 +39,6 @@ class BackgroundIOManager:
     def write_file(self, path: str, content: str):
         """Async write of arbitrary text file."""
         self._enqueue(_IOTask('write_file', (path, content)))
-
-    def log(self, logger_name: str, level: str, message: str):
-        """Async log call (for heavy log writes)."""
-        self._enqueue(_IOTask('log', (logger_name, level, message)))
 
     def flush(self, timeout: float = 5.0):
         """Block until queue is empty or timeout."""
@@ -72,7 +66,6 @@ class BackgroundIOManager:
             self._queue.put_nowait(task)
         except queue.Full:
             self._tasks_dropped += 1
-            # Drop non-critical tasks silently; session saves are critical
             if task.kind == 'save_session':
                 get_logger().error("BackgroundIO queue full — CRITICAL session save dropped!")
 
@@ -98,10 +91,6 @@ class BackgroundIOManager:
         elif task.kind == 'write_file':
             path, content = task.payload
             self._text_write(path, content)
-        elif task.kind == 'log':
-            logger_name, level, message = task.payload
-            logger = get_logger(logger_name)
-            getattr(logger, level, logger.info)(message)
 
     @staticmethod
     def _atomic_json_write(path: str, data: dict):

@@ -26,9 +26,6 @@ current_session_mgr: Optional[SessionManager] = None
 io_manager: Optional[BackgroundIOManager] = None
 
 
-# ============================================================================
-# Signal handling (with graceful flush)
-# ============================================================================
 def signal_handler(sig, frame):
     global running
     get_logger().info("Received interrupt signal, shutting down gracefully...")
@@ -45,11 +42,7 @@ def signal_handler(sig, frame):
     sys.exit(0)
 
 
-# ============================================================================
-# [OPT 3] Build Ollama options with performance defaults
-# ============================================================================
 def build_ollama_options() -> dict:
-    """Merge user OLLAMA_OPTIONS with performance defaults."""
     defaults = {
         'num_ctx': OLLAMA_NUM_CTX,
         'num_batch': OLLAMA_NUM_BATCH,
@@ -59,13 +52,12 @@ def build_ollama_options() -> dict:
         'use_mlock': True,
     }
     merged = {**defaults, **(OLLAMA_OPTIONS or {})}
-    # Filter out None/0 thread so Ollama picks auto
     if merged.get('num_thread') in (0, None):
         merged.pop('num_thread', None)
     return merged
 
 
-OLLAMA_MERGED_OPTIONS = None  # Lazy init
+OLLAMA_MERGED_OPTIONS = None
 
 
 def get_ollama_options() -> dict:
@@ -77,9 +69,6 @@ def get_ollama_options() -> dict:
     return OLLAMA_MERGED_OPTIONS
 
 
-# ============================================================================
-# Prompt loading / history building
-# ============================================================================
 def load_prompt(file_path: str) -> str:
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
@@ -98,9 +87,6 @@ def build_initial_history(system_prompt: str, user_first: str) -> List[Dict]:
     return history
 
 
-# ============================================================================
-# [REC 1] Context pruning
-# ============================================================================
 def prune_history(history: List[Dict], max_messages: int = MAX_HISTORY_MESSAGES) -> List[Dict]:
     if len(history) <= max_messages + 1:
         return history
@@ -130,22 +116,8 @@ def prune_history(history: List[Dict], max_messages: int = MAX_HISTORY_MESSAGES)
     return pruned + recent_part
 
 
-# ============================================================================
-# [OPT 2 + 8] Async prompt dump — runs in background I/O thread
-# ============================================================================
-def build_dump_text(messages: List[Dict], session_num: int, tokenizer) -> str:
-    """Build the text that will be written to LOG_CURRENT_INPUT."""
-    input_text = ""
-    if tokenizer is not None:
-        try:
-            formatted = tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
-            )
-            input_text = f"=== Session {session_num} ===\n{formatted}\n=== END INPUT ===\n"
-            return input_text
-        except Exception as e:
-            get_logger().debug(f"apply_chat_template failed: {e}")
-
+def build_dump_text(messages: List[Dict], session_num: int) -> str:
+    """Pure text dump without tokenizer."""
     input_text = f"=== Session {session_num} ===\n"
     for msg in messages:
         role = msg.get('role', 'unknown')
@@ -167,29 +139,20 @@ def build_dump_text(messages: List[Dict], session_num: int, tokenizer) -> str:
     return input_text
 
 
-def write_current_input_async(messages: List[Dict], session_num: int, tokenizer):
-    """Snapshot messages and hand them to background I/O (non-blocking)."""
+def write_current_input_async(messages: List[Dict], session_num: int):
     if io_manager is None:
         return
-    snapshot = [dict(m) for m in messages]  # shallow copy to avoid races
-    text = build_dump_text(snapshot, session_num, tokenizer)
+    snapshot = [dict(m) for m in messages]
+    text = build_dump_text(snapshot, session_num)
     io_manager.write_file(LOG_CURRENT_INPUT, text)
 
 
-# ============================================================================
-# Logging helpers
-# ============================================================================
 def log_message(session_num: int, msg_num: int, role: str, content: str = None, tool_calls: List = None):
     log = get_logger()
-    text_log = get_logger('text')
     log.info(f"Session {session_num}, msg {msg_num}: {role} message")
-    if role == 'assistant' and content:
-        text_log.info(f"Session {session_num}, msg {msg_num} (response):\n{content}")
+    # intentionally empty for assistant and tool
 
 
-# ============================================================================
-# Tool call parsing / finalization
-# ============================================================================
 def normalize_tool_call(tc) -> Dict:
     if isinstance(tc, dict):
         return tc
@@ -220,7 +183,7 @@ def _safe_parse_args(args: Any) -> Any:
             return json.loads(s)
         except json.JSONDecodeError:
             get_logger().warning(f"Failed to parse tool args: {s[:120]!r}")
-            return {"_raw": s}
+            return {"_raw": args}
     return args
 
 
@@ -256,9 +219,6 @@ def prepare_history_for_api(history: List[Dict], mode: str) -> List[Dict]:
     return formatted
 
 
-# ============================================================================
-# Pretty printing
-# ============================================================================
 def format_argument_value(value: Any, indent: int = 2) -> str:
     if isinstance(value, str) and '\n' in value:
         return '\n'.join(' ' * indent + line for line in value.splitlines())
@@ -320,12 +280,8 @@ def print_tool_result(tool_name: str, result: str):
     print()
 
 
-# ============================================================================
-# [REC 2] Robust streaming chat + [OPT 3] keep_alive + [OPT 10] profiling
-# ============================================================================
 def stream_chat(messages: List[Dict], session_num: int, tools=None):
     log = get_logger()
-    text_log = get_logger('text')
     prof = get_profiler()
 
     full_content = ""
@@ -344,7 +300,6 @@ def stream_chat(messages: List[Dict], session_num: int, tools=None):
             print(f"\n--- Session {session_num}, generating response ---")
 
             for chunk in stream:
-                # [OPT 10] Accumulate Ollama metrics from EVERY chunk
                 prof.record_ollama_metrics(chunk)
 
                 if 'message' not in chunk:
@@ -383,11 +338,7 @@ def stream_chat(messages: List[Dict], session_num: int, tools=None):
 
         print("\n--- End of response ---\n")
 
-        # [FIX] Record token count as COUNTER, not as time
         prof.increment('ollama_stream_tokens', token_count)
-
-        if full_thinking:
-            text_log.info(f"Session {session_num} (thinking):\n{full_thinking}")
 
         tool_calls = finalize_tool_calls(raw_tool_calls)
         if tool_calls:
@@ -402,7 +353,6 @@ def stream_chat(messages: List[Dict], session_num: int, tools=None):
 
 def get_chat_response(messages: List[Dict], session_num: int, tools=None):
     log = get_logger()
-    text_log = get_logger('text')
     prof = get_profiler()
 
     try:
@@ -418,7 +368,6 @@ def get_chat_response(messages: List[Dict], session_num: int, tools=None):
         raw_tool_calls = response['message'].get('tool_calls', []) or []
         tool_calls = finalize_tool_calls([normalize_tool_call(tc) for tc in raw_tool_calls])
 
-        # [OPT 10] Ollama-native metrics
         prof.record_ollama_metrics(response)
 
         thinking = None
@@ -428,7 +377,11 @@ def get_chat_response(messages: List[Dict], session_num: int, tools=None):
                 print(f"\n--- Thinking (session {session_num}) ---")
                 print(f"\033[90m{thinking}\033[0m")
                 print("--- End thinking ---\n")
-                text_log.info(f"Session {session_num} (thinking):\n{thinking}")
+
+        if content:
+            print(f"\n--- Session {session_num}, response ---")
+            print(content)
+            print("\n--- End response ---\n")
 
         if tool_calls:
             print_tool_calls(tool_calls)
@@ -440,9 +393,6 @@ def get_chat_response(messages: List[Dict], session_num: int, tools=None):
         return None, None, [], 0
 
 
-# ============================================================================
-# [REC 3] Truncation + [REC 4] end_session + [OPT 10] per-tool profiling
-# ============================================================================
 def _truncate(text: str, limit: int = MAX_TOOL_RESULT_LENGTH) -> str:
     text = str(text)
     if len(text) <= limit:
@@ -491,7 +441,6 @@ def process_tool_calls(
             'tool_call_id': tc.get('id') or f'tc_{current_msg_num}',
             'content': result,
         })
-        log_message(session_num, len(history), 'tool', result)
 
         if end_session_requested:
             return True
@@ -499,9 +448,6 @@ def process_tool_calls(
     return False
 
 
-# ============================================================================
-# Main loop
-# ============================================================================
 def main():
     global current_session_mgr, io_manager, running
     signal.signal(signal.SIGINT, signal_handler)
@@ -509,22 +455,9 @@ def main():
     log = get_logger()
     log.info("Starting LLM environment with Ollama")
 
-    # [OPT 8] Background I/O manager
     io_manager = BackgroundIOManager()
 
-    # [OPT 10] Profiler
     prof = get_profiler()
-
-    # [BUG FIX 3] Tokenizer loaded ONCE
-    tokenizer = None
-    try:
-        from transformers import AutoTokenizer
-        log.info(f"Loading tokenizer for '{MODEL_NAME}' (one-time)...")
-        with prof.measure('tokenizer_load'):
-            tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
-        log.info("Tokenizer loaded.")
-    except Exception as e:
-        log.warning(f"Could not load tokenizer: {e}. Plain-text dump will be used.")
 
     tool_loader.load_tools()
     log.info(f"Loaded tools: {list(tool_loader.AVAILABLE_TOOLS.keys())}")
@@ -537,7 +470,6 @@ def main():
     current_session_mgr = session_mgr
     msg_generator = UserMessageGenerator(inactivity_threshold=3)
 
-    # Pre-build options once (and log them)
     get_ollama_options()
 
     for session_index in range(MAX_SESSION_NUM):
@@ -554,7 +486,7 @@ def main():
 
         no_tool_streak = 0
 
-        while running and session_mgr.is_run_exists():
+        while running:
             session = session_mgr.current_session
             history = session.get('history', [])
 
@@ -566,14 +498,12 @@ def main():
                     session_mgr.update_current_session(history=history)
                 log_message(session_num, len(history), 'user', user_msg_content)
 
-            # [REC 1] Prune
             with prof.measure('prune_history'):
                 pruned = prune_history(history, MAX_HISTORY_MESSAGES)
             with prof.measure('prepare_history'):
                 api_history = prepare_history_for_api(pruned, THINKING_HISTORY_MODE)
 
-            # [OPT 2 + 8] Async prompt dump (non-blocking)
-            write_current_input_async(api_history, session_num, tokenizer)
+            write_current_input_async(api_history, session_num)
 
             current_tools = get_tools_for_ollama()
 
@@ -600,7 +530,6 @@ def main():
                 if tool_calls:
                     entry['tool_calls'] = tool_calls
                 history.append(entry)
-                log_message(session_num, len(history), 'assistant', assistant_msg)
                 with prof.measure('session_save'):
                     session_mgr.update_current_session(history=history)
 
@@ -617,20 +546,17 @@ def main():
                 session_mgr.complete_current_session()
                 break
 
-            # [OPT 10] Periodic report
             prof.step()
 
             if tool_calls:
                 continue
-
-        if not session_mgr.is_run_exists():
-            log.info(f"Session {session_num}: is_run removed, completed.")
-            session_mgr.complete_current_session()
+            else:
+                # No tool calls → session naturally ends after one assistant response
+                break
 
         if not running:
             break
 
-    # Final flush + report
     log.info("All sessions processed. Flushing background I/O...")
     if io_manager is not None:
         io_manager.shutdown(timeout=10.0)

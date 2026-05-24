@@ -2,21 +2,15 @@ import json
 import os
 from typing import Optional, Dict, Any, List
 
-from config import LOG_SESSIONS, IS_RUN_FILE
+from config import LOG_SESSIONS
 from logger_setup import get_logger
 
 
 class SessionManager:
     def __init__(self, io_manager=None):
         self.sessions_file = LOG_SESSIONS
-        self.is_run_file = IS_RUN_FILE
         self.current_session: Optional[Dict[str, Any]] = None
         self._io = io_manager
-        self._ensure_is_run()
-
-    def _ensure_is_run(self):
-        if not os.path.exists(self.is_run_file):
-            open(self.is_run_file, 'w').close()
 
     def _load_sessions(self) -> Dict[int, Dict]:
         if os.path.exists(self.sessions_file):
@@ -25,7 +19,6 @@ class SessionManager:
         return {}
 
     def _save_sessions(self, sessions: Dict[int, Dict]):
-        """Async save if io_manager present, otherwise sync."""
         if self._io is not None:
             self._io.save_session(self.sessions_file, sessions)
         else:
@@ -70,8 +63,6 @@ class SessionManager:
                 sessions[num]['status'] = 'completed'
                 self._save_sessions(sessions)
             self.current_session = None
-        if os.path.exists(self.is_run_file):
-            os.remove(self.is_run_file)
 
     def update_current_session(self, **kwargs):
         if self.current_session:
@@ -81,6 +72,3 @@ class SessionManager:
                 sessions[num].update(kwargs)
                 self._save_sessions(sessions)
                 self.current_session.update(kwargs)
-
-    def is_run_exists(self) -> bool:
-        return os.path.exists(self.is_run_file)
