@@ -3,12 +3,15 @@ import os
 from typing import Optional, Dict, Any, List
 
 from config import LOG_SESSIONS, IS_RUN_FILE
+from logger_setup import get_logger
+
 
 class SessionManager:
-    def __init__(self):
+    def __init__(self, io_manager=None):
         self.sessions_file = LOG_SESSIONS
         self.is_run_file = IS_RUN_FILE
         self.current_session: Optional[Dict[str, Any]] = None
+        self._io = io_manager
         self._ensure_is_run()
 
     def _ensure_is_run(self):
@@ -22,8 +25,12 @@ class SessionManager:
         return {}
 
     def _save_sessions(self, sessions: Dict[int, Dict]):
-        with open(self.sessions_file, 'w', encoding='utf-8') as f:
-            json.dump(sessions, f, indent=2, ensure_ascii=False)
+        """Async save if io_manager present, otherwise sync."""
+        if self._io is not None:
+            self._io.save_session(self.sessions_file, sessions)
+        else:
+            with open(self.sessions_file, 'w', encoding='utf-8') as f:
+                json.dump(sessions, f, indent=2, ensure_ascii=False)
 
     def get_last_session(self) -> Optional[Dict]:
         sessions = self._load_sessions()
@@ -38,11 +45,7 @@ class SessionManager:
         return session.get('status') == 'completed'
 
     def create_new_session(self, session_num: int, initial_history: List[Dict]) -> Dict:
-        session = {
-            'number': session_num,
-            'status': 'active',
-            'history': initial_history
-        }
+        session = {'number': session_num, 'status': 'active', 'history': initial_history}
         sessions = self._load_sessions()
         sessions[session_num] = session
         self._save_sessions(sessions)
@@ -56,17 +59,15 @@ class SessionManager:
                 last['history'] = []
             self.current_session = last
             return last
-        else:
-            next_num = (last['number'] + 1) if last else 1
-            if initial_history is None:
-                initial_history = []
-            return self.create_new_session(next_num, initial_history)
+        next_num = (last['number'] + 1) if last else 1
+        return self.create_new_session(next_num, initial_history or [])
 
     def complete_current_session(self):
         if self.current_session:
             sessions = self._load_sessions()
-            if self.current_session['number'] in sessions:
-                sessions[self.current_session['number']]['status'] = 'completed'
+            num = self.current_session['number']
+            if num in sessions:
+                sessions[num]['status'] = 'completed'
                 self._save_sessions(sessions)
             self.current_session = None
         if os.path.exists(self.is_run_file):

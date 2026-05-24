@@ -9,4 +9,5 @@
 !/tools/reload_tools.py
 is_run
 __pycache__
+!/prompts
 #!/prompts/*
