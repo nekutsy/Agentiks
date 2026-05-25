@@ -1,6 +1,7 @@
 *.txt
 *.log
 /sessions.json
+/metrics.json
 /tools/*
 !/tools/__init__.py
 !/tools/end_sesssion.py

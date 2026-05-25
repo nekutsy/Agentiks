@@ -1,9 +1,11 @@
-
+import json
+import os
 import statistics
 import threading
 import time
 from collections import defaultdict
 from contextlib import contextmanager
+from datetime import datetime
 from typing import Dict, List, Optional
 
 from logger_setup import get_logger
@@ -17,16 +19,13 @@ class PerformanceTracker:
         self._steps = 0
         self._report_every = report_every_n_steps
         self._session_start = time.monotonic()
-        # Ollama-native metrics
         self._total_prompt_tokens = 0
         self._total_gen_tokens = 0
         self._total_prefill_sec = 0.0
         self._total_decode_sec = 0.0
 
-    # ---------- Recording ----------
     @contextmanager
     def measure(self, name: str):
-        """Context manager: measure wall-clock time of a block."""
         t0 = time.perf_counter()
         try:
             yield
@@ -66,7 +65,6 @@ class PerformanceTracker:
         if should_report:
             self.report()
 
-    # ---------- Reporting ----------
     def report(self):
         with self._lock:
             samples_snapshot = {k: list(v) for k, v in self._samples.items()}
@@ -91,12 +89,10 @@ class PerformanceTracker:
                 avg = total / n
                 p95 = sorted(values)[int(n * 0.95)] if n >= 5 else max(values)
                 rows.append((name, n, total, avg, p95))
-            rows.sort(key=lambda r: r[2], reverse=True)  # by total time
+            rows.sort(key=lambda r: r[2], reverse=True)
             for name, n, total, avg, p95 in rows:
-                log.info(f"    {name:25s}  n={n:4d}  total={total:7.2f}s  "
-                         f"avg={avg:.3f}s  p95={p95:.3f}s")
+                log.info(f"    {name:25s}  n={n:4d}  total={total:7.2f}s  avg={avg:.3f}s  p95={p95:.3f}s")
 
-        # Ollama-native stats
         if total_prompt_tok or total_gen_tok:
             log.info("  --- Ollama inference ---")
             log.info(f"    Prompt tokens:  {total_prompt_tok}")
@@ -124,16 +120,96 @@ class PerformanceTracker:
                 'gen_tokens': self._total_gen_tokens,
                 'prefill_sec': self._total_prefill_sec,
                 'decode_sec': self._total_decode_sec,
-                'stages': {k: {'n': len(v), 'total': sum(v)}
-                           for k, v in self._samples.items()},
+                'stages': {k: {'n': len(v), 'total': sum(v)} for k, v in self._samples.items()},
                 'counters': dict(self._counters),
             }
 
+    def update_aggregated_metrics(self, model_name: str, filepath: str = "metrics.json"):
+        with self._lock:
+            total_time = time.monotonic() - self._session_start
+            total_prompt_tokens = self._counters.get('ollama_prompt_tokens', 0)
+            total_gen_tokens = self._counters.get('ollama_stream_tokens', 0)
+            total_prefill_sec = self._total_prefill_sec
+            total_decode_sec = self._total_decode_sec
 
-# Module-level singleton (easy to import)
+            tool_calls = {}
+            for key, count in self._counters.items():
+                if key.startswith('tool_calls:'):
+                    tool_name = key[len('tool_calls:'):]
+                    tool_calls[tool_name] = count
+
+            tool_total_duration = {}
+            tool_count_calls = {}
+            for name, durations in self._samples.items():
+                if name.startswith('tool:'):
+                    tool_name = name[len('tool:'):]
+                    tool_total_duration[tool_name] = sum(durations)
+                    tool_count_calls[tool_name] = len(durations)
+
+        existing = {}
+        if os.path.exists(filepath):
+            try:
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    existing = json.load(f)
+                    if not isinstance(existing, dict):
+                        existing = {}
+            except (json.JSONDecodeError, IOError):
+                existing = {}
+
+        model_data = existing.get(model_name, {
+            "model": model_name,
+            "run_count": 0,
+            "total_steps": 0,
+            "total_time_sec": 0.0,
+            "total_prompt_tokens": 0,
+            "total_gen_tokens": 0,
+            "total_prefill_sec": 0.0,
+            "total_decode_sec": 0.0,
+            "tool_calls_total": {},
+            "tool_total_duration_sec": {},
+        })
+
+        model_data["run_count"] += 1
+        model_data["total_steps"] += self._steps
+        model_data["total_time_sec"] += total_time
+        model_data["total_prompt_tokens"] += total_prompt_tokens
+        model_data["total_gen_tokens"] += total_gen_tokens
+        model_data["total_prefill_sec"] += total_prefill_sec
+        model_data["total_decode_sec"] += total_decode_sec
+
+        for tool_name, cnt in tool_calls.items():
+            model_data["tool_calls_total"][tool_name] = model_data["tool_calls_total"].get(tool_name, 0) + cnt
+
+        for tool_name, dur in tool_total_duration.items():
+            model_data["tool_total_duration_sec"][tool_name] = model_data["tool_total_duration_sec"].get(tool_name, 0.0) + dur
+
+        model_data["avg_prompt_tok_per_sec"] = (
+            model_data["total_prompt_tokens"] / model_data["total_prefill_sec"]
+            if model_data["total_prefill_sec"] > 0 else 0.0
+        )
+        model_data["avg_gen_tok_per_sec"] = (
+            model_data["total_gen_tokens"] / model_data["total_decode_sec"]
+            if model_data["total_decode_sec"] > 0 else 0.0
+        )
+        model_data["avg_tool_duration_sec"] = {}
+        for tool_name, total_dur in model_data["tool_total_duration_sec"].items():
+            call_count = model_data["tool_calls_total"].get(tool_name, 0)
+            model_data["avg_tool_duration_sec"][tool_name] = total_dur / call_count if call_count > 0 else 0.0
+
+        model_data["last_run_timestamp"] = datetime.now().isoformat()
+
+        existing[model_name] = model_data
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(existing, f, indent=2, ensure_ascii=False)
+
+        get_logger().info(f"Aggregated metrics for model '{model_name}' updated in {filepath} (total runs: {model_data['run_count']})")
+
+    def save_metrics_to_file(self, model_name: str, filepath: str = "metrics.json"):
+        self.update_aggregated_metrics(model_name, filepath)
+
+
 _tracker: Optional[PerformanceTracker] = None
 _tracker_lock = threading.Lock()
-
 
 def get_profiler() -> PerformanceTracker:
     global _tracker

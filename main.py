@@ -26,20 +26,29 @@ current_session_mgr: Optional[SessionManager] = None
 io_manager: Optional[BackgroundIOManager] = None
 
 
-def signal_handler(sig, frame):
+def save_metrics_and_exit():
+    """Сохраняет метрики и завершает программу."""
     global running
-    get_logger().info("Received interrupt signal, shutting down gracefully...")
     running = False
+    prof = get_profiler()
+    try:
+        prof.update_aggregated_metrics(MODEL_NAME)
+    except Exception as e:
+        get_logger().error(f"Failed to save metrics: {e}")
+    if io_manager is not None:
+        io_manager.shutdown(timeout=5.0)
+    prof.report()
+    sys.exit(0)
+
+
+def signal_handler(sig, frame):
+    get_logger().info("Received interrupt signal, shutting down gracefully...")
     if current_session_mgr and current_session_mgr.current_session:
         get_logger().info(
             f"Session {current_session_mgr.current_session['number']} interrupted, marking as completed."
         )
         current_session_mgr.complete_current_session()
-    if io_manager is not None:
-        get_logger().info("Flushing background I/O queue...")
-        io_manager.shutdown(timeout=5.0)
-    get_profiler().report()
-    sys.exit(0)
+    save_metrics_and_exit()
 
 
 def build_ollama_options() -> dict:
@@ -117,7 +126,6 @@ def prune_history(history: List[Dict], max_messages: int = MAX_HISTORY_MESSAGES)
 
 
 def build_dump_text(messages: List[Dict], session_num: int) -> str:
-    """Pure text dump without tokenizer."""
     input_text = f"=== Session {session_num} ===\n"
     for msg in messages:
         role = msg.get('role', 'unknown')
@@ -148,9 +156,7 @@ def write_current_input_async(messages: List[Dict], session_num: int):
 
 
 def log_message(session_num: int, msg_num: int, role: str, content: str = None, tool_calls: List = None):
-    log = get_logger()
-    log.info(f"Session {session_num}, msg {msg_num}: {role} message")
-    # intentionally empty for assistant and tool
+    get_logger().info(f"Session {session_num}, msg {msg_num}: {role} message")
 
 
 def normalize_tool_call(tc) -> Dict:
@@ -335,10 +341,11 @@ def stream_chat(messages: List[Dict], session_num: int, tools=None):
 
                 if 'eval_count' in chunk:
                     token_count = chunk['eval_count']
+                    prof.increment('ollama_stream_tokens', token_count)
+                if 'prompt_eval_count' in chunk:
+                    prof.increment('ollama_prompt_tokens', chunk['prompt_eval_count'])
 
         print("\n--- End of response ---\n")
-
-        prof.increment('ollama_stream_tokens', token_count)
 
         tool_calls = finalize_tool_calls(raw_tool_calls)
         if tool_calls:
@@ -369,6 +376,8 @@ def get_chat_response(messages: List[Dict], session_num: int, tools=None):
         tool_calls = finalize_tool_calls([normalize_tool_call(tc) for tc in raw_tool_calls])
 
         prof.record_ollama_metrics(response)
+        prof.increment('ollama_stream_tokens', response.get('eval_count', 0))
+        prof.increment('ollama_prompt_tokens', response.get('prompt_eval_count', 0))
 
         thinking = None
         if LOG_THINKING:
@@ -456,7 +465,6 @@ def main():
     log.info("Starting LLM environment with Ollama")
 
     io_manager = BackgroundIOManager()
-
     prof = get_profiler()
 
     tool_loader.load_tools()
@@ -551,18 +559,13 @@ def main():
             if tool_calls:
                 continue
             else:
-                # No tool calls → session naturally ends after one assistant response
                 break
 
         if not running:
             break
 
     log.info("All sessions processed. Flushing background I/O...")
-    if io_manager is not None:
-        io_manager.shutdown(timeout=10.0)
-        log.info(f"Background I/O stats: {io_manager.stats()}")
-    prof.report()
-    log.info("Exiting.")
+    save_metrics_and_exit()
 
 
 if __name__ == "__main__":
